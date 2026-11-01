@@ -30,11 +30,11 @@ static void fdlist_free(FdList *l) {
 	errno = tmp;
 }
 
-static DIR* open_hwmon_dir(const char *path) {
+static DIR* open_hwmon_dir(const char *hwmon_dir_path, char *name) {
 	DIR *ret_dirp = NULL;
 	DIR *dirp;
 	int dir_fd;
-	if ((dir_fd = openat(0, path, 0)) == -1)
+	if ((dir_fd = openat(0, hwmon_dir_path, 0)) == -1)
 		return NULL;
 	if ((dirp = fdopendir(dir_fd)) == NULL) {
 		close(dir_fd);
@@ -42,8 +42,9 @@ static DIR* open_hwmon_dir(const char *path) {
 	}
 
 	char path_buf[(sizeof("hwmon") - 1) + 4 + sizeof("/name")];
-	/* Note: name is newline terminated, I reuse null byte here to store it. */
-	char name_buf[sizeof("dell_smm")];
+	/* 64 bytes should be more than enough.
+	 * TODO: When writing config parser should limit name length there */
+	char name_buf[64];
 	int name_fd, file_fd;
 	ssize_t nread;
 	for (struct dirent *d = readdir(dirp); d; d = readdir(dirp)) {
@@ -59,8 +60,10 @@ static DIR* open_hwmon_dir(const char *path) {
 		nread = read(name_fd, name_buf, sizeof(name_buf));
 		close(name_fd);
 		if (nread == -1
-			|| nread != sizeof(name_buf)
-			|| strncmp(name_buf, "dell_smm\n", sizeof(name_buf)) != 0) {
+			|| nread == 0
+			|| strncmp(name_buf, name, nread-1) != 0
+			|| name_buf[nread-1] != '\n'
+		) {
 			continue;
 		}
 
@@ -196,10 +199,11 @@ static const int config_len = LENGTH(config);
 #define INPUT_RE "^temp[0-9]+_input$"
 #define PWM_RE "^pwm[0-9]+$"
 #define HWMON_PATH "/sys/class/hwmon"
+#define DELL_SMM_NAME "dell_smm"
 int main(int argc, char **argv) {
 	(void)argc;
 	(void)argv;
-	DIR* hwmon_dir = open_hwmon_dir(HWMON_PATH);
+	DIR* hwmon_dir = open_hwmon_dir(HWMON_PATH, DELL_SMM_NAME);
 	if (!hwmon_dir) {
 		perror("hwmon_dir");
 		return 1;
