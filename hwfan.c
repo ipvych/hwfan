@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
 	}
 	closedir(hwmon_dir);
 
-	int config_n = 0;
+	int config_n = -1; /* -1 is special at start to set the speed */
 	FdList *p;
 	while (1) {
 		long num;
@@ -231,12 +231,12 @@ int main(int argc, char **argv) {
 		} while((p = p->next));
 		max_temp /= 1000; /* Temp is stored in millidegrees */
 
-		int i = config_n;
+		int i = config_n == -1 ? 0 : config_n;
 		while (i < config_len-1 && max_temp >= config[i].high)
 			i++;
 		while (i > 0 && max_temp <= config[i].low)
 			i--;
-		if (i != config_n) {
+		if (config_n == -1 || i != config_n) {
 			char buf[7]; /* 6 bytes for number + 1 for newline. */
 			int len = snprintf(buf, sizeof(buf), "%d\n", config[i].speed);
 			if (len == -1)
