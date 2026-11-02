@@ -9,9 +9,9 @@
 #include <regex.h>
 #include <sys/timerfd.h>
 
-#define LENGTH(x) (sizeof (x) / sizeof (x)[0])
 #define IS_SPECIAL_DOT_NAME(str) \
 	(str[0] == '.' && (str[1] == '\0' || (str[1] == '.' && str[2] == '\0')))
+#define ISSPACE(c) (c == ' ' || c == '\t')
 
 typedef struct FdList {
 	int fd;
@@ -32,6 +32,183 @@ static void fdlist_free(FdList *l) {
 	errno = tmp;
 }
 
+#define MAX_ARG_LEN 128
+#define MAX_TEMPS_LEN 16
+
+typedef enum {
+	CONFIG_OK = 0,
+	CONFIG_NULL_IN_FILE,
+	CONFIG_TOO_MANY_TEMPS,
+	CONFIG_MISSING_ARG,
+	CONFIG_ARG_TOO_LONG,
+	CONFIG_EXTRA_ARG,
+	CONFIG_INVALID_ARG,
+	CONFIG_INVALID_DIRECTIVE,
+	CONFIG_NAME_UNSET,
+	CONFIG_SENSOR_UNSET,
+	CONFIG_PWM_UNSET,
+	CONFIG_TEMPS_UNSET
+} ConfigErr;
+
+struct ConfigTemp {
+	int low;
+	int high;
+	int speed;
+};
+
+struct Config {
+	char name[MAX_ARG_LEN];
+	char sensor_regex[MAX_ARG_LEN];
+	char pwm_regex[MAX_ARG_LEN];
+	struct ConfigTemp temps[MAX_TEMPS_LEN];
+	int temps_len;
+	int lineno;
+	int err;
+};
+
+static char* nexttok(char *str, char **saveptr, size_t *lenp) {
+	if (*saveptr != NULL)
+		str = *saveptr;
+	/* Skip space at the start and bail if str is empty or is a comment */
+	while (*str && ISSPACE(*str))
+		str++;
+	if (*str == '\0' || *str == '#')
+		return NULL;
+
+	/* Go to the next token; if comment is encountered store '\0' in saveptr
+	 * so that next invocation will return NULL from the loop above. */
+	size_t len = 0;
+	char *ptr = str;
+	while (*ptr && !ISSPACE(*ptr) && *ptr != '#') {
+		len++;
+		ptr++;
+	}
+	if (*ptr == '#') {
+		*ptr = '\0';
+	} else if (ISSPACE(*ptr)) {
+		*ptr = '\0';
+		ptr++;
+	}
+	*saveptr = ptr;
+	if (lenp)
+		*lenp = len;
+	return str;
+}
+
+static int read_config(FILE *f, struct Config *cfg) {
+	int rc = 0;
+	char *lineptr = NULL, *saveptr, *token;
+	size_t toklen, linesize;
+	ssize_t nread;
+	cfg->lineno = 0;
+	cfg->name[0] = '\0';
+	cfg->sensor_regex[0] = '\0';
+	cfg->pwm_regex[0] = '\0';
+	cfg->temps_len = 0;
+	while((nread = getline(&lineptr, &linesize, f)) != -1) {
+		cfg->lineno++;
+		/* Bail on embedded NULL's */
+		for (ssize_t i = 0; i < nread; i++) {
+			if (lineptr[i] == '\0') {
+				cfg->err = CONFIG_NULL_IN_FILE;
+				goto err;
+			}
+		}
+		lineptr[nread-1] = '\0'; /* Trim newline */
+
+		saveptr = NULL;
+		/* First call will return NULL when line is empty */
+		token = nexttok(lineptr, &saveptr, NULL);
+		if (token == NULL)
+			continue;
+		if (strcmp(token, "name") == 0) {
+			token = nexttok(NULL, &saveptr, &toklen);
+			if (token == NULL) {
+				cfg->err = CONFIG_MISSING_ARG;
+				goto err;
+			}
+			if (toklen > MAX_ARG_LEN) {
+				cfg->err = CONFIG_ARG_TOO_LONG;
+				goto err;
+			}
+			memcpy(cfg->name, token, toklen+1);
+		} else if (strcmp(token, "sensor_regex") == 0) {
+			token = nexttok(NULL, &saveptr, &toklen);
+			if (token == NULL) {
+				cfg->err = CONFIG_MISSING_ARG;
+				goto err;
+			}
+			if (toklen > MAX_ARG_LEN) {
+				cfg->err = CONFIG_ARG_TOO_LONG;
+				goto err;
+			}
+			memcpy(cfg->sensor_regex, token, toklen+1);
+		} else if (strcmp(token, "pwm_regex") == 0) {
+			token = nexttok(NULL, &saveptr, &toklen);
+			if (token == NULL) {
+				cfg->err = CONFIG_MISSING_ARG;
+				goto err;
+			}
+			if (toklen > MAX_ARG_LEN) {
+				cfg->err = CONFIG_ARG_TOO_LONG;
+				goto err;
+			}
+			memcpy(cfg->pwm_regex, token, toklen+1);
+		} else if (strcmp(token, "temp") == 0) {
+			if (cfg->temps_len >= MAX_TEMPS_LEN) {
+				cfg->err = CONFIG_TOO_MANY_TEMPS;
+				goto err;
+			}
+			int *temps[3] = {
+				&cfg->temps[cfg->temps_len].low,
+				&cfg->temps[cfg->temps_len].high,
+				&cfg->temps[cfg->temps_len].speed
+			};
+			for (int i = 0; i < 3; i++) {
+				token = nexttok(NULL, &saveptr, &toklen);
+				if (token == NULL) {
+					cfg->err = CONFIG_MISSING_ARG;
+					goto err;
+				}
+				if (toklen > MAX_ARG_LEN) {
+					cfg->err = CONFIG_ARG_TOO_LONG;
+					goto err;
+				}
+				char *endptr;
+				int v = (int)strtol(token, &endptr, 10);
+				if (endptr == token || *endptr != '\0') {
+					cfg->err = CONFIG_INVALID_ARG;
+					goto err;
+				}
+				*(temps[i]) = v;
+			}
+			cfg->temps_len++;
+		} else {
+			cfg->err = CONFIG_INVALID_DIRECTIVE;
+			goto err;
+		}
+
+		if (nexttok(NULL, &saveptr, NULL) != NULL) {
+			cfg->err = CONFIG_EXTRA_ARG;
+			goto err;
+		}
+	}
+	goto exit;
+err:
+	rc = -1;
+exit:
+	free(lineptr);
+	if (cfg->name[0] == '\0')
+		return CONFIG_NAME_UNSET;
+	if (cfg->sensor_regex[0] == '\0')
+		return CONFIG_SENSOR_UNSET;
+	if (cfg->pwm_regex[0] == '\0')
+		return CONFIG_PWM_UNSET;
+	if (cfg->temps_len == 0)
+		return CONFIG_TEMPS_UNSET;
+	return rc;
+}
+
 static DIR* open_hwmon_dir(const char *hwmon_dir_path, char *name) {
 	DIR *ret_dirp = NULL;
 	DIR *dirp;
@@ -44,9 +221,7 @@ static DIR* open_hwmon_dir(const char *hwmon_dir_path, char *name) {
 	}
 
 	char path_buf[(sizeof("hwmon") - 1) + 4 + sizeof("/name")];
-	/* 64 bytes should be more than enough.
-	 * TODO: When writing config parser should limit name length there */
-	char name_buf[64];
+	char name_buf[MAX_ARG_LEN];
 	int name_fd, file_fd;
 	ssize_t nread;
 	for (struct dirent *d = readdir(dirp); d; d = readdir(dirp)) {
@@ -178,40 +353,63 @@ static int read_long(int fd, long *out) {
 	return 0;
 }
 
-struct ConfigEntry {
-	int speed;
-	int low;
-	int high;
-};
-
-enum {
-	SPEED_OFF = 0,
-	SPEED_LOW = 128,
-	SPEED_MAX = 255,
-};
-
-static const struct ConfigEntry config[] = {
-	{SPEED_OFF, -1, 65},
-	{SPEED_LOW, 45, 75},
-	{SPEED_MAX, 60, 128},
-};
-static const int config_len = LENGTH(config);
-
-/* TODO: Document that regexp matching is greedy when writing config parser. */
-#define INPUT_RE "^temp[0-9]+_input$"
-#define PWM_RE "^pwm[0-9]+$"
+#define DEFAULT_CONFIG_PATH "/etc/hwfan.conf"
 #define HWMON_PATH "/sys/class/hwmon"
-#define DELL_SMM_NAME "dell_smm"
 int main(int argc, char **argv) {
 	(void)argc;
 	(void)argv;
-	DIR* hwmon_dir = open_hwmon_dir(HWMON_PATH, DELL_SMM_NAME);
+	struct Config cfg;
+	FILE *f = fopen(DEFAULT_CONFIG_PATH, "r");
+	if (f == NULL) {
+		perror("failed opening config file");
+		return -1;
+	}
+	if (read_config(f, &cfg) != CONFIG_OK) {
+		switch (cfg.err) {
+		case CONFIG_NULL_IN_FILE:
+			fprintf(stderr, "error: null character at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_TOO_MANY_TEMPS:
+			fprintf(stderr, "error: too many temperature definitions at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_MISSING_ARG:
+			fprintf(stderr, "error: missing argument at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_ARG_TOO_LONG:
+			fprintf(stderr, "error: argument too long at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_EXTRA_ARG:
+			fprintf(stderr, "error: extra argument at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_INVALID_ARG:
+			fprintf(stderr, "error: argument is invalid at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_INVALID_DIRECTIVE:
+			fprintf(stderr, "error: invalid directive at line %d\n", cfg.lineno);
+			break;
+		case CONFIG_NAME_UNSET:
+			fprintf(stderr, "error: name is not set in config\n");
+			break;
+		case CONFIG_SENSOR_UNSET:
+			fprintf(stderr, "error: sensor_regex is not set in config\n");
+			break;
+		case CONFIG_PWM_UNSET:
+			fprintf(stderr, "error: pwm_regex is not set in config\n");
+			break;
+		case CONFIG_TEMPS_UNSET:
+			fprintf(stderr, "error: temps are not set in config\n");
+			break;
+		}
+		return 1;
+	}
+
+	DIR* hwmon_dir = open_hwmon_dir(HWMON_PATH, cfg.name);
 	if (!hwmon_dir) {
 		perror("hwmon_dir");
 		return 1;
 	}
 	FdList *pwm_fds, *sensor_fds;
-	if (open_control_fds(hwmon_dir, PWM_RE, &pwm_fds, INPUT_RE, &sensor_fds) == -1) {
+	if (open_control_fds(hwmon_dir, cfg.pwm_regex, &pwm_fds, cfg.sensor_regex, &sensor_fds) == -1) {
 		perror("open fds");
 		return 1;
 	}
@@ -222,7 +420,7 @@ int main(int argc, char **argv) {
 	 * As alternative I could read fan speeds continuously and adjust speeds
 	 * that way but on my system (Dell XPS 15 9550) doing that triggers BIOS
 	 * interrupts that cause audio dropouts so I have to do it this way. */
-	int tfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC);
+	int tfd = timerfd_create(CLOCK_BOOTTIME, 0);
 	if (tfd == -1){
 		perror("timerfd_create");
 		return 1;
@@ -253,13 +451,13 @@ int main(int argc, char **argv) {
 		max_temp /= 1000; /* Temp is stored in millidegrees */
 
 		int i = config_n == -1 ? 0 : config_n;
-		while (i < config_len-1 && max_temp >= config[i].high)
+		while (i < cfg.temps_len-1 && max_temp >= cfg.temps[i].high)
 			i++;
-		while (i > 0 && max_temp <= config[i].low)
+		while (i > 0 && max_temp <= cfg.temps[i].low)
 			i--;
 		if (config_n == -1 || i != config_n) {
 			char buf[7]; /* 6 bytes for number + 1 for newline. */
-			int len = snprintf(buf, sizeof(buf), "%d\n", config[i].speed);
+			int len = snprintf(buf, sizeof(buf), "%d\n", cfg.temps[i].speed);
 			if (len == -1)
 				return 1;
 			p = pwm_fds;
