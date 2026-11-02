@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <regex.h>
+#include <sys/timerfd.h>
 
 #define LENGTH(x) (sizeof (x) / sizeof (x)[0])
 #define IS_SPECIAL_DOT_NAME(str) \
@@ -215,7 +217,26 @@ int main(int argc, char **argv) {
 	}
 	closedir(hwmon_dir);
 
-	int config_n = -1; /* -1 is special at start to set the speed */
+	/* Timerfd armed for CLOCK_BOOTTIME is used to be able to tell when the
+	 * system wakes up from sleep, otherwise plain sleep(1) would work.
+	 * As alternative I could read fan speeds continuously and adjust speeds
+	 * that way but on my system (Dell XPS 15 9550) doing that triggers BIOS
+	 * interrupts that cause audio dropouts so I have to do it this way. */
+	int tfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC);
+	if (tfd == -1){
+		perror("timerfd_create");
+		return 1;
+	}
+	const struct itimerspec spec = {
+		.it_value = (struct timespec){ .tv_sec = 1 },
+		.it_interval = (struct timespec){ .tv_sec = 1 },
+	};
+	if (timerfd_settime(tfd, 0, &spec, NULL) == -1) {
+		perror("timerfd_settime");
+		return 1;
+	}
+	uint64_t timebuf;
+	int config_n = -1; /* -1 is special and forces fan speed to be updated */
 	FdList *p;
 	while (1) {
 		long num;
@@ -249,6 +270,11 @@ int main(int argc, char **argv) {
 			} while((p = p->next));
 			config_n = i;
 		}
-		sleep(1);
+		if (read(tfd, &timebuf, sizeof(timebuf)) == -1) {
+			perror("read tfd");
+			return 1;
+		}
+		if (timebuf > 2) /* Woke up from suspend - update timer speeds */
+			config_n = -1;
 	}
 }
