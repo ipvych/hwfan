@@ -33,12 +33,12 @@ static void fdlist_free(FdList *l) {
 }
 
 #define MAX_ARG_LEN 128
-#define MAX_TEMPS_LEN 16
+#define MAX_STATES 16
 
 typedef enum {
 	CONFIG_OK = 0,
 	CONFIG_NULL_IN_FILE,
-	CONFIG_TOO_MANY_TEMPS,
+	CONFIG_TOO_MANY_STATES,
 	CONFIG_MISSING_ARG,
 	CONFIG_ARG_TOO_LONG,
 	CONFIG_EXTRA_ARG,
@@ -47,10 +47,10 @@ typedef enum {
 	CONFIG_NAME_UNSET,
 	CONFIG_SENSOR_UNSET,
 	CONFIG_PWM_UNSET,
-	CONFIG_TEMPS_UNSET
+	CONFIG_STATES_UNSET
 } ConfigErr;
 
-struct ConfigTemp {
+struct ConfigState {
 	int low;
 	int high;
 	int speed;
@@ -60,8 +60,8 @@ struct Config {
 	char name[MAX_ARG_LEN];
 	char sensor_regex[MAX_ARG_LEN];
 	char pwm_regex[MAX_ARG_LEN];
-	struct ConfigTemp temps[MAX_TEMPS_LEN];
-	int temps_len;
+	struct ConfigState states[MAX_STATES];
+	int states_len;
 	int lineno;
 	int err;
 };
@@ -103,7 +103,7 @@ static int read_config(FILE *f, struct Config *cfg) {
 	cfg->name[0] = '\0';
 	cfg->sensor_regex[0] = '\0';
 	cfg->pwm_regex[0] = '\0';
-	cfg->temps_len = 0;
+	cfg->states_len = 0;
 	while((nread = getline(&lineptr, &linesize, f)) != -1) {
 		cfg->lineno++;
 		/* Bail on embedded NULL's */
@@ -154,15 +154,15 @@ static int read_config(FILE *f, struct Config *cfg) {
 				goto err;
 			}
 			memcpy(cfg->pwm_regex, token, toklen+1);
-		} else if (strcmp(token, "temp") == 0) {
-			if (cfg->temps_len >= MAX_TEMPS_LEN) {
-				cfg->err = CONFIG_TOO_MANY_TEMPS;
+		} else if (strcmp(token, "state") == 0) {
+			if (cfg->states_len >= MAX_STATES) {
+				cfg->err = CONFIG_TOO_MANY_STATES;
 				goto err;
 			}
-			int *temps[3] = {
-				&cfg->temps[cfg->temps_len].low,
-				&cfg->temps[cfg->temps_len].high,
-				&cfg->temps[cfg->temps_len].speed
+			int *states[3] = {
+				&cfg->states[cfg->states_len].speed,
+				&cfg->states[cfg->states_len].low,
+				&cfg->states[cfg->states_len].high
 			};
 			for (int i = 0; i < 3; i++) {
 				token = nexttok(NULL, &saveptr, &toklen);
@@ -180,9 +180,9 @@ static int read_config(FILE *f, struct Config *cfg) {
 					cfg->err = CONFIG_INVALID_ARG;
 					goto err;
 				}
-				*(temps[i]) = v;
+				*(states[i]) = v;
 			}
-			cfg->temps_len++;
+			cfg->states_len++;
 		} else {
 			cfg->err = CONFIG_INVALID_DIRECTIVE;
 			goto err;
@@ -204,8 +204,8 @@ exit:
 		return CONFIG_SENSOR_UNSET;
 	if (cfg->pwm_regex[0] == '\0')
 		return CONFIG_PWM_UNSET;
-	if (cfg->temps_len == 0)
-		return CONFIG_TEMPS_UNSET;
+	if (cfg->states_len < 2)
+		return CONFIG_STATES_UNSET;
 	return rc;
 }
 
@@ -368,8 +368,8 @@ int main(int argc, char **argv) {
 		case CONFIG_NULL_IN_FILE:
 			fprintf(stderr, "error: null character at line %d\n", cfg.lineno);
 			break;
-		case CONFIG_TOO_MANY_TEMPS:
-			fprintf(stderr, "error: too many temperature definitions at line %d\n", cfg.lineno);
+		case CONFIG_TOO_MANY_STATES:
+			fprintf(stderr, "error: too many state definitions at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_MISSING_ARG:
 			fprintf(stderr, "error: missing argument at line %d\n", cfg.lineno);
@@ -395,8 +395,8 @@ int main(int argc, char **argv) {
 		case CONFIG_PWM_UNSET:
 			fprintf(stderr, "error: pwm_regex is not set in config\n");
 			break;
-		case CONFIG_TEMPS_UNSET:
-			fprintf(stderr, "error: temps are not set in config\n");
+		case CONFIG_STATES_UNSET:
+			fprintf(stderr, "error: states are not set in config\n");
 			break;
 		}
 		return 1;
@@ -450,13 +450,13 @@ int main(int argc, char **argv) {
 		max_temp /= 1000; /* Temp is stored in millidegrees */
 
 		int i = config_n == -1 ? 0 : config_n;
-		while (i < cfg.temps_len-1 && max_temp >= cfg.temps[i].high)
+		while (i < cfg.states_len-1 && max_temp >= cfg.states[i].high)
 			i++;
-		while (i > 0 && max_temp <= cfg.temps[i].low)
+		while (i > 0 && max_temp <= cfg.states[i].low)
 			i--;
 		if (config_n == -1 || i != config_n) {
 			char buf[7]; /* 6 bytes for number + 1 for newline. */
-			int len = snprintf(buf, sizeof(buf), "%d\n", cfg.temps[i].speed);
+			int len = snprintf(buf, sizeof(buf), "%d\n", cfg.states[i].speed);
 			if (len == -1)
 				return 1;
 			p = pwm_fds;
