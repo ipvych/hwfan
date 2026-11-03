@@ -1,0 +1,138 @@
+.Dd $Mdocdate: November 9 2026 $
+.Dt HWFAN 1
+.Os
+.Sh NAME
+.Nm hwfan
+.Nd Fan control daemon
+.Sh SYNOPSIS
+.Nm
+.Bk -words
+.Op Fl c Ar config_file
+.Op Fl vn
+
+.Ek
+.Sh DESCRIPTION
+.Nm
+is the daemon program that monitors hardware temperatures and sets
+fan speeds using Linux hwmon
+.Xr sysfs 5
+interface.
+
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl c Ar config_file
+Read configuration from this file instead of default
+.Pa /etc/hwfan.conf .
+.Pp
+.It Fl v
+Verbose mode. The daemon writes messages to standard error noting
+what temperatures it reads and what fan speeds it sets.
+.Pp
+.It Fl n
+Dry-run mode. The daemon will not set the fan speed, only read
+temperatures and print what it will do. Enables verbose mode as with
+.Fl v .
+
+.Ek
+.Sh CONFIGURATION
+.Nm
+reads configuration data from
+.Pa /etc/hwfan.conf
+(or the file specified with
+.Fl c
+option on the command line).
+
+The file contains keyword-argument sequences, one per line. Unless
+noted otherwise, for each keyword, the last obtained value will be
+used. Empty lines and all text following ‘#’ are interpreted as
+comments. Arguments are separated by whitespace. Quoting is not
+supported as names in hwmon sysfs tree should, generally not contain
+any whitespace.
+
+Regular expressions, where used are POSIX extended regular
+expressions matched using
+.Xr regcomp 3
+and
+.Xr regexec 3
+functions. Keep in mind that regex matching is non-greedy, meaning
+that regular expression "pwm[0-9]+" will match both "pwm1" and
+"pwm1_enable" files. To make regex match entire word surround it in
+beginning/ending of line regex match characters, e.g. for example
+above writing "^pwm[0-9]+$" will only match "pwm1".
+
+The possible keywords and their meanings are as follows:
+.Bl -tag -width Ds
+.It Cm name Ar name
+Specifies name to match hwmon interface with.
+.It Cm sensor_regex Ar regex
+Specifies regular expression used to match files from which
+temperature will be read. Temperature is expected to be in
+millidegrees. When regex matches multiple files all of them will be
+read and max value will be used.
+.It Cm pwm_regex Cm Ar regex
+Specifies regular expression used to match files to which
+.Ar speed
+value configured using
+.Cm state
+directive below will be written to set fan speed.
+.It Cm state Ar speed t_low t_high
+Specifies temperature states;
+.Nm
+switches to the next state when
+.Ar t_high
+temperature is reached and goes back to previous state when
+temperature goes back to
+.Ar t_low .
+Switching states is accomplished by writing values specified in
+.Ar speed
+plus a newline to all files that were matched by
+.Cm pwm_regex
+above.
+
+At lest 2 states must be configured.
+.Ar t_low
+and
+.Ar t_high
+are ignored in the first/last states as there is no state
+following them to.
+
+.Ek
+.Sh EXAMPLES
+The following example configuration sets up manual fan control for
+Dell laptop using dell_smm hwmon entry. This is also a default
+configuration that should be accessible at
+.Pa /etc/hwfan.conf
+on most installations.
+
+.Bl -item -compact -offset indent
+.It
+name dell_smm
+.It
+sensor_regex ^temp[0-9]_input$
+.It
+pwm_regex ^pwm[0-9]+$
+.It
+# The fan switches to medium speed when reaching temperature
+.It
+# of 65 degrees, then to max speed on 75 degrees. It goes down
+.It
+# to medium speed when reaching 60 degrees and disables fans
+.It
+# after reaching 45 degrees.
+.It
+state 0   -1 65
+.It
+state 128 45 75
+.It
+state 255 60 128
+.El
+
+.Ek
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/hwfan.conf
+Default configuration file location.
+
+.Ek
+.Sh SEE ALSO
+.Xr sysfs 5
