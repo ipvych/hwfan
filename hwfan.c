@@ -69,14 +69,11 @@ struct Config {
 static char* nexttok(char *str, char **saveptr, size_t *lenp) {
 	if (*saveptr != NULL)
 		str = *saveptr;
-	/* Skip space at the start and bail if str is empty or is a comment */
 	while (*str && ISSPACE(*str))
 		str++;
 	if (*str == '\0' || *str == '#')
 		return NULL;
 
-	/* Go to the next token; if comment is encountered store '\0' in saveptr
-	 * so that next invocation will return NULL from the loop above. */
 	size_t len = 0;
 	char *ptr = str;
 	while (*ptr && !ISSPACE(*ptr) && *ptr != '#') {
@@ -84,6 +81,8 @@ static char* nexttok(char *str, char **saveptr, size_t *lenp) {
 		ptr++;
 	}
 	if (*ptr == '#') {
+		/* Storing \0 in saveptr makes next call return NULL when checking for
+		 * empty string above. */
 		*ptr = '\0';
 	} else if (ISSPACE(*ptr)) {
 		*ptr = '\0';
@@ -114,10 +113,11 @@ static int read_config(FILE *f, struct Config *cfg) {
 				goto err;
 			}
 		}
-		lineptr[nread-1] = '\0'; /* Trim newline */
+		/* Don't need terminating newline for splitting tokens */
+		lineptr[nread-1] = '\0';
 
 		saveptr = NULL;
-		/* First call will return NULL when line is empty */
+		/* First call will return NULL when line is empty or a comment */
 		token = nexttok(lineptr, &saveptr, NULL);
 		if (token == NULL)
 			continue;
@@ -233,7 +233,6 @@ static DIR* open_hwmon_dir(const char *hwmon_dir_path, char *name) {
 		name_fd = openat(dir_fd, path_buf, O_RDONLY);
 		if (name_fd == -1)
 			continue;
-
 		nread = read(name_fd, name_buf, sizeof(name_buf));
 		close(name_fd);
 		if (nread == -1
