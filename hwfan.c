@@ -9,6 +9,8 @@
 #include <regex.h>
 #include <sys/timerfd.h>
 
+#define DEFAULT_CONFIG_PATH "/etc/hwfan.conf"
+#define HWMON_PATH "/sys/class/hwmon"
 #define IS_SPECIAL_DOT_NAME(str) \
 	(str[0] == '.' && (str[1] == '\0' || (str[1] == '.' && str[2] == '\0')))
 #define ISSPACE(c) (c == ' ' || c == '\t')
@@ -283,7 +285,7 @@ static int open_control_fds(
 		if (IS_SPECIAL_DOT_NAME(d->d_name))
 			continue;
 		if (regexec(&pwm_regp, d->d_name, 0, NULL, 0) == 0) {
-			file_fd = openat(dir_fd, d->d_name, O_RDWR);
+			file_fd = openat(dir_fd, d->d_name, O_WRONLY);
 			if (file_fd == -1)
 				goto err;
 			new = malloc(sizeof(FdList));
@@ -352,51 +354,77 @@ static int read_long(int fd, long *out) {
 	return 0;
 }
 
-#define DEFAULT_CONFIG_PATH "/etc/hwfan.conf"
-#define HWMON_PATH "/sys/class/hwmon"
 int main(int argc, char **argv) {
-	(void)argc;
-	(void)argv;
+	int opt;
+	int dry_run = 0, verbose = 0;
+	char *confpath = DEFAULT_CONFIG_PATH;
+	while ((opt = getopt(argc, argv, "vnhc:")) != -1) {
+		switch (opt) {
+		case 'v':
+			verbose = 1;
+			break;
+		case 'n':
+			verbose = 1;
+			dry_run = 1;
+			break;
+		case 'c':
+			confpath = optarg;
+			break;
+		default:
+			fprintf(stderr,
+				"Usage: hwfan [-c config_file] [-vn] [-h]\n\n"
+				"Options:\n"
+				"  -c config_file\n"
+				"       Use this file as config instead of default from " DEFAULT_CONFIG_PATH "\n"
+				"  -v  Enable verbose logging\n"
+				"  -n  Dry-run mode. Print the speeds that will be set without actually setting them\n"
+				"  -h  Show this message\n"
+			);
+			return 1;
+		}
+	}
+
 	struct Config cfg;
-	FILE *f = fopen(DEFAULT_CONFIG_PATH, "r");
+	FILE *f = fopen(confpath, "r");
 	if (f == NULL) {
 		perror("failed opening config file");
 		return -1;
 	}
 	if (read_config(f, &cfg) != CONFIG_OK) {
+		fprintf(stderr, "error when reading config: ");
 		switch (cfg.err) {
 		case CONFIG_NULL_IN_FILE:
-			fprintf(stderr, "error: null character at line %d\n", cfg.lineno);
+			fprintf(stderr, "null character at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_TOO_MANY_STATES:
-			fprintf(stderr, "error: too many state definitions at line %d\n", cfg.lineno);
+			fprintf(stderr, "too many state definitions at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_MISSING_ARG:
-			fprintf(stderr, "error: missing argument at line %d\n", cfg.lineno);
+			fprintf(stderr, "missing argument at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_ARG_TOO_LONG:
-			fprintf(stderr, "error: argument too long at line %d\n", cfg.lineno);
+			fprintf(stderr, "argument too long at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_EXTRA_ARG:
-			fprintf(stderr, "error: extra argument at line %d\n", cfg.lineno);
+			fprintf(stderr, "extra argument at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_INVALID_ARG:
-			fprintf(stderr, "error: argument is invalid at line %d\n", cfg.lineno);
+			fprintf(stderr, "argument is invalid at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_INVALID_DIRECTIVE:
-			fprintf(stderr, "error: invalid directive at line %d\n", cfg.lineno);
+			fprintf(stderr, "invalid directive at line %d\n", cfg.lineno);
 			break;
 		case CONFIG_NAME_UNSET:
-			fprintf(stderr, "error: name is not set in config\n");
+			fprintf(stderr, "name is not set in config\n");
 			break;
 		case CONFIG_SENSOR_UNSET:
-			fprintf(stderr, "error: sensor_regex is not set in config\n");
+			fprintf(stderr, "sensor_regex is not set in config\n");
 			break;
 		case CONFIG_PWM_UNSET:
-			fprintf(stderr, "error: pwm_regex is not set in config\n");
+			fprintf(stderr, "pwm_regex is not set in config\n");
 			break;
 		case CONFIG_STATES_UNSET:
-			fprintf(stderr, "error: states are not set in config\n");
+			fprintf(stderr, "states are not set in config\n");
 			break;
 		}
 		return 1;
@@ -404,12 +432,12 @@ int main(int argc, char **argv) {
 
 	DIR* hwmon_dir = open_hwmon_dir(HWMON_PATH, cfg.name);
 	if (!hwmon_dir) {
-		perror("hwmon_dir");
+		perror("failed opening hwmon directory");
 		return 1;
 	}
 	FdList *pwm_fds, *sensor_fds;
 	if (open_control_fds(hwmon_dir, cfg.pwm_regex, &pwm_fds, cfg.sensor_regex, &sensor_fds) == -1) {
-		perror("open fds");
+		perror("failed opening sensor or pwm files");
 		return 1;
 	}
 	closedir(hwmon_dir);
@@ -421,7 +449,7 @@ int main(int argc, char **argv) {
 	 * interrupts that cause audio dropouts so I have to do it this way. */
 	int tfd = timerfd_create(CLOCK_BOOTTIME, 0);
 	if (tfd == -1){
-		perror("timerfd_create");
+		perror("failed opening sleep timer");
 		return 1;
 	}
 	const struct itimerspec spec = {
@@ -429,7 +457,7 @@ int main(int argc, char **argv) {
 		.it_interval = (struct timespec){ .tv_sec = 1 },
 	};
 	if (timerfd_settime(tfd, 0, &spec, NULL) == -1) {
-		perror("timerfd_settime");
+		perror("failed arming sleep timer");
 		return 1;
 	}
 	uint64_t timebuf;
@@ -440,14 +468,18 @@ int main(int argc, char **argv) {
 		int max_temp = 0;
 		p = sensor_fds;
 		do {
-			if (read_long(p->fd, &num) == -1)
+			if (read_long(p->fd, &num) == -1) {
 				/* Bail early as this can't happen with valid config */
+				perror("failed reading temperature");
 				return 1;
+			}
 			if (num > max_temp)
 				max_temp = num;
 			lseek(p->fd, 0, SEEK_SET);
 		} while((p = p->next));
 		max_temp /= 1000; /* Temp is stored in millidegrees */
+		if (verbose)
+			fprintf(stderr, "read max temperature %d\n", max_temp);
 
 		int i = config_n == -1 ? 0 : config_n;
 		while (i < cfg.states_len-1 && max_temp >= cfg.states[i].high)
@@ -455,20 +487,25 @@ int main(int argc, char **argv) {
 		while (i > 0 && max_temp <= cfg.states[i].low)
 			i--;
 		if (config_n == -1 || i != config_n) {
+			if (verbose)
+				fprintf(stderr, "setting speed to %d\n", cfg.states[i].speed);
 			char buf[7]; /* 6 bytes for number + 1 for newline. */
+			/* Error should not happen here as config is already checked */
 			int len = snprintf(buf, sizeof(buf), "%d\n", cfg.states[i].speed);
-			if (len == -1)
-				return 1;
 			p = pwm_fds;
-			do {
-				if (write(p->fd, buf, len) == -1)
-					/* Bail early as this can't happen with valid config */
-					return 1;
-			} while((p = p->next));
+			if (!dry_run) {
+				do {
+					if (write(p->fd, buf, len) == -1) {
+						/* Bail early as this can't happen with valid config */
+						perror("failed setting fan speed");
+						return 1;
+					}
+				} while((p = p->next));
+			}
 			config_n = i;
 		}
 		if (read(tfd, &timebuf, sizeof(timebuf)) == -1) {
-			perror("read tfd");
+			perror("failed reading from sleep timer");
 			return 1;
 		}
 		if (timebuf > 2) /* Woke up from suspend - update timer speeds */
