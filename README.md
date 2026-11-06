@@ -7,4 +7,4 @@ make install
 make uninstall
 ```
 
-Documentation is in [](hwfan.1).
+Documentation is in [hwfan.1](hwfan.1).
