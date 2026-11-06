@@ -39,7 +39,6 @@ static void fdlist_free(FdList *l) {
 
 typedef enum {
 	CONFIG_OK = 0,
-	CONFIG_NULL_IN_FILE,
 	CONFIG_TOO_MANY_STATES,
 	CONFIG_MISSING_ARG,
 	CONFIG_ARG_TOO_LONG,
@@ -108,14 +107,11 @@ static int read_config(FILE *f, struct Config *cfg) {
 	cfg->states_len = 0;
 	while((nread = getline(&lineptr, &linesize, f)) != -1) {
 		cfg->lineno++;
-		/* Bail on embedded NULL's */
-		for (ssize_t i = 0; i < nread; i++) {
-			if (lineptr[i] == '\0') {
-				cfg->err = CONFIG_NULL_IN_FILE;
-				goto err;
-			}
-		}
-		/* Don't need terminating newline for splitting tokens */
+		/* Don't need terminating newline for splitting tokens.
+		 * Note: I don't explicitly handle embedded NULL's as it requires
+		 * walking over string twice which I don't like. At worst they will
+		 * just be treated as an extra comment character which is fine.
+		 */
 		lineptr[nread-1] = '\0';
 
 		saveptr = NULL;
@@ -393,9 +389,6 @@ int main(int argc, char **argv) {
 	if (read_config(f, &cfg) != CONFIG_OK) {
 		fprintf(stderr, "error when reading config: ");
 		switch (cfg.err) {
-		case CONFIG_NULL_IN_FILE:
-			fprintf(stderr, "null character at line %d\n", cfg.lineno);
-			break;
 		case CONFIG_TOO_MANY_STATES:
 			fprintf(stderr, "too many state definitions at line %d\n", cfg.lineno);
 			break;
